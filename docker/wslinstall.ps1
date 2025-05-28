@@ -31,6 +31,7 @@ if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     }
 }
 
+Write-Host "NekroAgent WSL 安装脚本"
 Write-Host "脚本以管理员权限运行"
 
 $Global:RebootNeeded = $false
@@ -46,7 +47,7 @@ $DistroFilePath = Join-Path $WorkDir "distro.zip"
 $AppxFilePath = Join-Path $WorkDir "appx.zip"
 $TarballFilePath = Join-Path $WorkDir "install.tar.gz"
 
-$DistroInstallLocation = Join-Path $env:LOCALAPPDATA "NekroAgent"
+$DistroInstallLocation = $InstallPath
 
 $WSLStatus = [PSCustomObject]@{
     Enabled = $true
@@ -183,6 +184,7 @@ function Ensure-WindowsFeatureEnabled {
 
 # 在 WSL 执行代码
 function Invoke-WslCommand {
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory=$true)]
         [string]$DistributionName,
@@ -191,15 +193,26 @@ function Invoke-WslCommand {
         [Parameter()]
         [string]$Username = "root"
     )
-    Write-Verbose "在发行版 '$DistributionName' 中以用户 '$Username' 执行命令: $Command"
-    $execResult = wsl.exe -d $DistributionName -u $Username -e bash -c "$Command"
-    if (-not [string]::IsNullOrWhiteSpace($execResult)) {
-        Write-Host "命令输出:"
-        $execResult | ForEach-Object { Write-Verbose "  $_" }
-    }
-    if ($LASTEXITCODE -ne 0) {
+
+    $wslArgs = @(
+        "-d", $DistributionName,
+        "-u", $Username,
+        "-e", "bash", "-c",
+        $Command
+    )
+
+    $null = wsl.exe @wslArgs 2>&1
+    $exitCode = $LASTEXITCODE
+    $isSuccess = ($exitCode -eq 0)
+
+    if ($exitCode -ne 0) {
         Write-Host "命令执行失败：" -ForegroundColor RED
         $Command | ForEach-Object { Write-Host "  $_"  -ForegroundColor RED }
+    }
+
+    return [PSCustomObject]@{
+        Success     = $isSuccess
+        ExitCode    = $exitCode
     }
 }
 
@@ -227,20 +240,19 @@ function Test-WslAvailability {
         [string]$DistroName
     )
 
-    $installedDistributions = wsl.exe --list --quiet --all
+    try {
+        $installedDistributions = wsl.exe --list --quiet --all
+    } catch {}
     if ($LASTEXITCODE -ne 0) { $WSLStatus.Enabled = $false }
     if ($installedDistributions -contains $DistroName) {
         $WSLStatus.DistroInstalled = $true
     }
 }
 
-
 # 检测环境可用性
+Write-Host ""
+Write-Host "正在检测环境..."
 Test-WslAvailability $DistroName
-if ($WSLStatus.DistroInstalled) {
-    Write-Host "'$DistroName' 已安装，退出..."
-    Confirm-ExitWithEnter
-}
 
 try {
     $processorInfo = Get-CimInstance -Class Win32_Processor -ErrorAction Stop | Select-Object -First 1
@@ -277,6 +289,18 @@ if ($Global:HypervisorPresent -or $Global:VirtualizationFirmwareEnabled) {
     Write-Warning "可能会导致后续步骤失败（未验证）"
 }
 
+if ($WSLStatus.Enabled) {
+    Write-Host "WSL 可用性：已启用"
+} else {
+    Write-Host "WSL 可用性：未启用"
+}
+if (-not $WSLStatus.DistroInstalled) {
+    Write-Host "`'$DistroName`'：未安装"
+} else {
+    Write-Host "`'$DistroName`'：已安装"
+    Confirm-ExitWithEnter
+}
+Write-Host ("-"*40)
 
 Write-Warning "NekroAgent 将安装在 '$InstallPath'"
 $userConfirmation = Read-Host -Prompt "是否继续安装？ (y/N)"
@@ -296,8 +320,6 @@ if (-not $WSLStatus.Enabled) {
         Write-Host "--------------------------------------------------------------------"
         Confirm-ExitWithEnter
     }
-} else {
-    Write-Host "WSL 已安装"
 }
 
 # 更新 WSL
@@ -335,6 +357,7 @@ if (-not (Test-Path -Path $WorkDir -PathType Container)) {
         return $null
     }
 }
+Write-Host ("-"*40)
 
 # 获取 tarball 文件
 try {
@@ -342,6 +365,7 @@ try {
     if (-not $result) {
         Throw "文件下载失败：'$DebianLink'"
     }
+
     $result = Extract-FileFromArchive -ArchivePath "$DistroFilePath" -EntryPathRegexPattern ".*_${Global:ArchString}.appx" -DestinationFilePath "$AppxFilePath"
     if (-not $result) {
         Throw "文件提取失败"
@@ -351,7 +375,8 @@ try {
         Throw "文件提取失败：'install.tar.gz'"
     }
 } catch {
-    $($_.Exception.Message)
+    Write-Host $($_.Exception.Message) -ForegroundColor Red
+    Confirm-ExitWithEnter 1
 }
 
 # 导入 WSL
@@ -368,16 +393,20 @@ if ($LASTEXITCODE -eq 0) {
     }
     Confirm-ExitWithEnter 1
 }
+Write-Host ("-"*40)
 
 # 定制
 $newUserName = "nekro"
-$createUserCommand = "useradd -m -s /bin/bash $newUserName && echo '${newUserName}:123456' | chpasswd"
-$addToSudoCommand = "usermod -aG sudo $newUserName"
+$newUserPassword = '$1$gslhAKeE$ymfRbdU08IdKMRobb3hpy0'
+$createUserCommand = "useradd -m -s /bin/bash $newUserName -p '$newUserPassword' -G sudo"
 
-Write-Host "正在创建 'nekro' 用户，密码 123456"
-Invoke-WslCommand -DistributionName $DistroName -Command $createUserCommand
-Write-Host "正在将用户 'nekro' 添加至 sudo"
-Invoke-WslCommand -DistributionName $DistroName -Command $addToSudoCommand
+Write-Host "正在创建 '$newUserName' 用户"
+$result = Invoke-WslCommand -DistributionName $DistroName -Command $createUserCommand
+if ($result.Success) {
+    Write-Host "创建成功" -ForegroundColor Green
+} else {
+    Write-Host "创建失败" -ForegroundColor Red
+}
 
 $wslConfContent = @"
 [user]
@@ -387,25 +416,31 @@ default=$newUserName
 hostname = Nekro-Agent
 
 [interop]
-enable = true
+enabled = true
 appendWindowsPath = false
 
 [boot]
 systemd = true
 "@
-$setWslConfCommand = "echo `'$wslConfContent`' | tee /etc/wsl.conf"
-$setWslConfCommand = $setWslConfCommand -replace "`r`n", "`n"
-Write-Host "正在写入 '/etc/wsl.conf'"
-Invoke-WslCommand -DistributionName $DistroName -Command $setWslConfCommand
+$setWslConfCommand = "echo `'$wslConfContent`' | tee /etc/wsl.conf >/dev/null"
+Write-Host "正在写入配置 '/etc/wsl.conf'"
+$result = Invoke-WslCommand -DistributionName $DistroName -Command $setWslConfCommand
+if ($result.Success) {
+    Write-Host "写入成功" -ForegroundColor Green
+} else {
+    Write-Host "写入失败" -ForegroundColor Red
+}
 
 $null = wsl --terminate $DistroName
 
-Write-Host "--------------------------------------------------------------------"
-Write-Host "nekro-agent 已安装成功。"
-Write-Host "可使用 'wsl -d nekro-agent' 启动"
-Write-Host "用户 nekro 的密码为 123456"
+Write-Host ("-"*40)
+Write-Host "`"$DistroName`" 已安装成功。"
+Write-Host "可使用 'wsl -d `"$DistroName`"' 启动"
+Write-Host "用户 '$newUserName' 的密码为 " -NoNewline
+Write-Host "123456" -ForegroundColor Blue
 Write-Host "若安装过程遇到错误请重新执行脚本"
 Write-Host "或前往 Github/QQ 反馈"
-Write-Host "--------------------------------------------------------------------"
+Write-Host ("-"*40)
 
-Read-Host "脚本执行完毕。按 Enter 键关闭此窗口..."
+Write-Host "脚本执行完毕。"
+Confirm-ExitWithEnter
