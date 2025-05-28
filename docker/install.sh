@@ -48,53 +48,118 @@ generate_random_string() {
     tr -dc 'a-zA-Z0-9' < /dev/urandom | fold -w "$length" | head -n 1
 }
 
-# 一键部署 nekro-agent 插件脚本
+# 选择 Docker 安装镜像
+select_docker_install_mirror() {
+    echo "请选择使用的 Docker 安装源："
+    echo "    1) Docker 官方"
+    echo "    2) 阿里"
+    echo "    3) Azure 中国云"
+    echo -n "请输入选项数字 (默认为 1): "
 
-# region 更新软件源
-echo "正在更新软件源..."
-if ! sudo apt-get update; then
-    echo "Error: 更新软件源失败，请检查您的网络连接。"
-    exit 1
-fi
+    read -r num
+    echo ""
+    [ -z "$num" ] && num=1
+    case "$num" in
+        1)
+            ;;
+        2)
+            DOCKER_MIRROR="Aliyun"
+            ;;
+        3)
+            DOCKER_MIRROR="AzureChinaCloud"
+            ;;
+        *)
+            >&2 echo "未知选项，退出..."
+            exit 1
+            ;;
+    esac
+}
 
-# 检查 Docker 安装情况
-if ! command -v docker &>/dev/null; then
-    read -r -p "Docker 未安装，是否安装？[Y/n] " answer
-    if [[ $answer == "Y" || $answer == "y" || $answer == "" ]]; then
+# 通过脚本安装 docker
+install_docker_via_official_script() {
+    mirror="${1:-Aliyun}"
+    max_retries=3
+    attempt_num=0
+
+    echo "尝试获取 Docker 安装脚本..."
+    while [ "$attempt_num" -le "$max_retries" ]; do
+        if content=$(curl -fsSL https://get.docker.com); then
+            echo "Docker 安装脚本下载完成."
+            # 使用 sed 命令修改 sleep 以取消等待
+            if printf '%s\n' "$content" | sed 's#sleep#test#g' | sh -s -- --mirror "$mirror"; then
+                return 0
+            else
+                echo "Docker 安装失败..." >&2
+                return 1
+            fi
+        else
+            if [ "$attempt_num" -eq "$max_retries" ]; then
+                echo "Docker 安装脚本下载失败..." >&2
+                return 1
+            fi
+            echo "Docker 安装脚本下载失败，正在重试($((attempt_num + 1))/$((max_retries - 1)))"
+            sleep 1
+        fi
+        attempt_num=$((attempt_num + 1))
+    done
+    return 1
+}
+
+# Docker 备用安装方式
+install_docker_fallback() {
+    if ! command -v docker &>/dev/null; then
+        if ! command -v apt-get &>/dev/null; then
+            echo "包管理器非 apt，暂不支持..."
+            return 1
+        fi
+        echo "正在更新软件源..."
+        if ! sudo apt-get update; then
+            echo "Error: 更新软件源失败，请检查您的网络连接。"
+            return 1
+        fi
         echo "正在安装 Docker..."
         if ! sudo apt-get install docker.io -y; then
-            echo "Error: Docker 安装失败，请检查您的网络连接或软件源配置。"
-            exit 1
+            echo "Error: Docker 安装失败，请检查您的网络连接或软件源配置。" >&2
+            return 1
         fi
-    else
-        echo "Error: Docker 未安装。请先安装 Docker 后再运行该脚本。"
-        echo "安装命令: sudo apt-get install docker.io"
-        exit 1
     fi
-fi
 
-# 检查 Docker Compose 安装情况
-if ! command -v docker-compose &>/dev/null; then
-    read -r -p "Docker Compose 未安装，是否安装？[Y/n] " answer
-    if [[ $answer == "Y" || $answer == "y" || $answer == "" ]]; then
+    if ! command -v docker-compose &>/dev/null; then
         echo "正在安装 Docker Compose..."
-        if ! sudo curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose; then
+        if ! sudo curl -L "https://github.com/docker/compose/releases/download/1.36.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose; then
+            rm -rf /usr/local/bin/docker-compose
             echo "Error: Docker Compose 下载失败，请检查您的网络连接，或使用以下命令手动安装："
-            echo "curl -L https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m) -o /usr/local/bin/docker-compose && sudo chmod +x /usr/local/bin/docker-compose"
-            exit 1
+            echo "curl -L https://github.com/docker/compose/releases/download/1.36.2/docker-compose-$(uname -s)-$(uname -m) -o /usr/local/bin/docker-compose && sudo chmod +x /usr/local/bin/docker-compose"
+            return 1
         fi
         if ! sudo chmod +x /usr/local/bin/docker-compose; then
             echo "Error: 无法设置 Docker Compose 可执行权限，请检查您的权限配置。"
-            exit 1
+            return 1
         fi
-    else
-        echo "Error: Docker Compose 未安装。请先安装 Docker Compose 后再运行该脚本。"
-        echo "安装命令: sudo curl -L https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m) -o /usr/local/bin/docker-compose && sudo chmod +x /usr/local/bin/docker-compose"
+    fi
+}
+
+# 安装 Docker
+if ! command -v docker &>/dev/null && ! command -v docker-compose &>/dev/null; then
+    echo -n "Docker 或 Docker Compose 未安装，是否安装？[Y/n] "
+    read -r yn
+    echo ""
+    [ -z "$yn" ] && yn=y
+    if ! [[ "$yn" =~ ^[Yy]$ ]]; then
+        echo "已取消..." >&2
         exit 1
     fi
+    echo "正在通过 Docker 官方安装脚本进行安装"
+    select_docker_install_mirror
+    if ! install_docker_via_official_script "$DOCKER_MIRROR"; then
+        echo "Docker 安装失败..." >&2
+        echo "正在尝试备用安装方式..."
+        if install_docker_fallback; then
+            echo "安装失败，退出..."
+            exit 1
+        fi
+    fi
 fi
-
-# endregion
 
 # 设置应用目录 优先使用环境变量
 if [ -z "$NEKRO_DATA_DIR" ]; then
@@ -204,9 +269,12 @@ if [ -f .env ]; then
     fi
 fi
 
-read -r -p "请检查并按需修改.env文件中的配置，未修改则按照默认配置安装，确认是否继续安装？[Y/n] " answer
-if [[ $answer == "n" || $answer == "N" ]]; then
-    echo "安装已取消"
+echo -n "请检查并按需修改.env文件中的配置，未修改则按照默认配置安装，确认是否继续安装？[Y/n] "
+read -r yn
+echo ""
+[ -z "$yn" ] && yn=y
+if ! [[ "$yn" =~ ^[Yy]$ ]]; then
+    echo -e "安装已取消..."
     exit 0
 fi
 
@@ -246,16 +314,18 @@ if ! sudo docker pull kromiose/nekro-agent-sandbox; then
 fi
 
 # 放行防火墙端口
-echo -e "\n正在配置防火墙..."
-echo "放行 NekroAgent 主服务端口 ${NEKRO_EXPOSE_PORT:-8021}/tcp..."
-if ! sudo ufw allow "${NEKRO_EXPOSE_PORT:-8021}/tcp"; then
-    echo "Warning: 无法放行防火墙端口 ${NEKRO_EXPOSE_PORT:-8021}，如服务访问受限，请检查防火墙设置。"
-fi
+if command -v ufw &>/dev/null; then
+    echo -e "\n正在配置防火墙..."
+    echo "放行 NekroAgent 主服务端口 ${NEKRO_EXPOSE_PORT:-8021}/tcp..."
+    if ! sudo ufw allow "${NEKRO_EXPOSE_PORT:-8021}/tcp"; then
+        echo "Warning: 无法放行防火墙端口 ${NEKRO_EXPOSE_PORT:-8021}，如服务访问受限，请检查防火墙设置。"
+    fi
 
-if [ "$WITH_NAPCAT" ]; then
-    echo "放行 NapCat 服务端口 ${NAPCAT_EXPOSE_PORT:-6099}/tcp..."
-    if ! sudo ufw allow "${NAPCAT_EXPOSE_PORT:-6099}/tcp"; then
-        echo "Warning: 无法放行防火墙端口 ${NAPCAT_EXPOSE_PORT:-6099}，如服务访问受限，请检查防火墙设置。"
+    if [ "$WITH_NAPCAT" ]; then
+        echo "放行 NapCat 服务端口 ${NAPCAT_EXPOSE_PORT:-6099}/tcp..."
+        if ! sudo ufw allow "${NAPCAT_EXPOSE_PORT:-6099}/tcp"; then
+            echo "Warning: 无法放行防火墙端口 ${NAPCAT_EXPOSE_PORT:-6099}，如服务访问受限，请检查防火墙设置。"
+        fi
     fi
 fi
 
@@ -263,8 +333,6 @@ echo -e "\n=== 部署完成！==="
 echo "你可以通过以下命令查看服务日志："
 echo "  NekroAgent: 'sudo docker logs -f ${INSTANCE_NAME}nekro_agent'"
 echo "  NapCat: 'sudo docker logs -f ${INSTANCE_NAME}napcat'"
-
-
 
 # 显示重要的配置信息
 echo -e "\n=== 重要配置信息 ==="
