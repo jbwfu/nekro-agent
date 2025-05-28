@@ -45,7 +45,7 @@ get_remote_file() {
 # 生成随机字符串的函数
 generate_random_string() {
     local length=$1
-    cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w $length | head -n 1
+    tr -dc 'a-zA-Z0-9' < /dev/urandom | fold -w "$length" | head -n 1
 }
 
 # 一键部署 nekro-agent 插件脚本
@@ -59,7 +59,7 @@ fi
 
 # 检查 Docker 安装情况
 if ! command -v docker &>/dev/null; then
-    read -p "Docker 未安装，是否安装？[Y/n] " answer
+    read -r -p "Docker 未安装，是否安装？[Y/n] " answer
     if [[ $answer == "Y" || $answer == "y" || $answer == "" ]]; then
         echo "正在安装 Docker..."
         if ! sudo apt-get install docker.io -y; then
@@ -75,7 +75,7 @@ fi
 
 # 检查 Docker Compose 安装情况
 if ! command -v docker-compose &>/dev/null; then
-    read -p "Docker Compose 未安装，是否安装？[Y/n] " answer
+    read -r -p "Docker Compose 未安装，是否安装？[Y/n] " answer
     if [[ $answer == "Y" || $answer == "y" || $answer == "" ]]; then
         echo "正在安装 Docker Compose..."
         if ! sudo curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose; then
@@ -106,16 +106,16 @@ echo "NEKRO_DATA_DIR: $NEKRO_DATA_DIR"
 export NEKRO_DATA_DIR=$NEKRO_DATA_DIR
 
 # 创建应用目录
-mkdir -p $NEKRO_DATA_DIR || {
+mkdir -p "$NEKRO_DATA_DIR" || {
     echo "Error: 无法创建应用目录 $NEKRO_DATA_DIR，请检查您的权限配置。"
     exit 1
 }
 
 # 设置开放目录权限
-sudo chmod -R 777 $NEKRO_DATA_DIR
+sudo chmod -R 777 "$NEKRO_DATA_DIR"
 
 # 进入应用目录
-cd $NEKRO_DATA_DIR || {
+cd "$NEKRO_DATA_DIR" || {
     echo "Error: 无法进入应用目录 $NEKRO_DATA_DIR。"
     exit 1
 }
@@ -194,15 +194,17 @@ if [ -f .env ]; then
     fi
     export NEKRO_EXPOSE_PORT=$NEKRO_EXPOSE_PORT
 
-    NAPCAT_EXPOSE_PORT=$(grep NAPCAT_EXPOSE_PORT .env | cut -d '=' -f2)
-    if [ -z "$NAPCAT_EXPOSE_PORT" ]; then
-        echo "Error: NAPCAT_EXPOSE_PORT 未在 .env 文件中设置"
-        exit 1
+    if [ "$WITH_NAPCAT" ]; then
+        NAPCAT_EXPOSE_PORT=$(grep NAPCAT_EXPOSE_PORT .env | cut -d '=' -f2)
+        if [ -z "$NAPCAT_EXPOSE_PORT" ]; then
+            echo "Error: NAPCAT_EXPOSE_PORT 未在 .env 文件中设置"
+            exit 1
+        fi
+        export NAPCAT_EXPOSE_PORT=$NAPCAT_EXPOSE_PORT
     fi
-    export NAPCAT_EXPOSE_PORT=$NAPCAT_EXPOSE_PORT
 fi
 
-read -p "请检查并按需修改.env文件中的配置，未修改则按照默认配置安装，确认是否继续安装？[Y/n] " answer
+read -r -p "请检查并按需修改.env文件中的配置，未修改则按照默认配置安装，确认是否继续安装？[Y/n] " answer
 if [[ $answer == "n" || $answer == "N" ]]; then
     echo "安装已取消"
     exit 0
@@ -246,24 +248,23 @@ fi
 # 放行防火墙端口
 echo -e "\n正在配置防火墙..."
 echo "放行 NekroAgent 主服务端口 ${NEKRO_EXPOSE_PORT:-8021}/tcp..."
-if ! sudo ufw allow ${NEKRO_EXPOSE_PORT:-8021}/tcp; then
+if ! sudo ufw allow "${NEKRO_EXPOSE_PORT:-8021}/tcp"; then
     echo "Warning: 无法放行防火墙端口 ${NEKRO_EXPOSE_PORT:-8021}，如服务访问受限，请检查防火墙设置。"
 fi
 
-echo "放行 NapCat 服务端口 ${NAPCAT_EXPOSE_PORT:-6099}/tcp..."
-if ! sudo ufw allow ${NAPCAT_EXPOSE_PORT:-6099}/tcp; then
-    echo "Warning: 无法放行防火墙端口 ${NAPCAT_EXPOSE_PORT:-6099}，如服务访问受限，请检查防火墙设置。"
+if [ "$WITH_NAPCAT" ]; then
+    echo "放行 NapCat 服务端口 ${NAPCAT_EXPOSE_PORT:-6099}/tcp..."
+    if ! sudo ufw allow "${NAPCAT_EXPOSE_PORT:-6099}/tcp"; then
+        echo "Warning: 无法放行防火墙端口 ${NAPCAT_EXPOSE_PORT:-6099}，如服务访问受限，请检查防火墙设置。"
+    fi
 fi
 
 echo -e "\n=== 部署完成！==="
 echo "你可以通过以下命令查看服务日志："
-if [ -z "$INSTANCE_NAME" ]; then
-    echo "  NekroAgent: 'sudo docker logs -f nekro_agent'"
-    echo "  NapCat: 'sudo docker logs -f napcat'"
-else
-    echo "  NekroAgent: \"sudo docker logs -f ${INSTANCE_NAME}nekro_agent\""
-    echo "  NapCat: \"sudo docker logs -f ${INSTANCE_NAME}napcat\""
-fi
+echo "  NekroAgent: 'sudo docker logs -f ${INSTANCE_NAME}nekro_agent'"
+echo "  NapCat: 'sudo docker logs -f ${INSTANCE_NAME}napcat'"
+
+
 
 # 显示重要的配置信息
 echo -e "\n=== 重要配置信息 ==="
@@ -276,17 +277,19 @@ echo "管理员账号: admin | 密码: ${NEKRO_ADMIN_PASSWORD}"
 echo -e "\n=== 服务访问信息 ==="
 echo "NekroAgent 主服务端口: ${NEKRO_EXPOSE_PORT:-8021}"
 echo "NekroAgent Web 访问地址: http://127.0.0.1:${NEKRO_EXPOSE_PORT:-8021}"
-echo "NapCat 服务端口: ${NAPCAT_EXPOSE_PORT:-6099}"
+if [ "$WITH_NAPCAT" ]; then
+    echo "NapCat 服务端口: ${NAPCAT_EXPOSE_PORT:-6099}"
+else
+    echo "OneBot WebSocket 连接地址: ws://127.0.0.1:${NEKRO_EXPOSE_PORT:-8021}/onebot/v11/ws"
+fi
 
 echo -e "\n=== 注意事项 ==="
 echo "1. 如果您使用的是云服务器，请在云服务商控制台的安全组中放行以下端口："
 echo "   - ${NEKRO_EXPOSE_PORT:-8021}/tcp (NekroAgent 主服务)"
-echo "   - ${NAPCAT_EXPOSE_PORT:-6099}/tcp (NapCat 服务)"
-echo "2. 如果需要从外部访问，请将上述地址中的 127.0.0.1 替换为您的服务器公网IP"
-if [ -z "$INSTANCE_NAME" ]; then
-    echo "3. 请使用 'sudo docker logs napcat' 查看机器人 QQ 账号二维码进行登录"
-else
-    echo "3. 请使用 \"sudo docker logs ${INSTANCE_NAME}napcat\" 查看机器人 QQ 账号二维码进行登录"
+if [ "$WITH_NAPCAT" ]; then
+    echo "   - ${NAPCAT_EXPOSE_PORT:-6099}/tcp (NapCat 服务)"
 fi
+echo "2. 如果需要从外部访问，请将上述地址中的 127.0.0.1 替换为您的服务器公网IP"
+echo "3. 请使用 'sudo docker logs ${INSTANCE_NAME}napcat' 查看机器人 QQ 账号二维码进行登录"
 
 echo -e "\n安装完成！祝您使用愉快！"
