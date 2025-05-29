@@ -400,7 +400,8 @@ $newUserName = "nekro"
 $newUserPassword = '$1$gslhAKeE$ymfRbdU08IdKMRobb3hpy0'
 $createUserCommand = "useradd -m -s /bin/bash $newUserName -p '$newUserPassword' -G sudo"
 
-Write-Host "正在创建 '$newUserName' 用户"
+Write-Host "正在配置 '$DistroName'，部分操作涉及网络，请耐心等待..."
+Write-Host "正在创建 '$newUserName' 用户..."
 $result = Invoke-WslCommand -DistributionName $DistroName -Command $createUserCommand
 if ($result.Success) {
     Write-Host "创建成功" -ForegroundColor Green
@@ -429,6 +430,90 @@ if ($result.Success) {
     Write-Host "写入成功" -ForegroundColor Green
 } else {
     Write-Host "写入失败" -ForegroundColor Red
+}
+
+Write-Host "正在替换为清华源..."
+$replaceSourceCommand = "sed -i 's#deb.debian.org#mirrors.tuna.tsinghua.edu.cn#g' /etc/apt/sources.list"
+$result = Invoke-WslCommand -DistributionName $DistroName -Command $replaceSourceCommand
+if ($result.Success) {
+    Write-Host "替换成功"  -ForegroundColor Green
+} else {
+    Write-Host "替换失败" -ForegroundColor Red
+}
+
+Write-Host "正在更新源..."
+$updateSourceCommand = "apt-get update | cat"
+$result = Invoke-WslCommand -DistributionName $DistroName -Command $updateSourceCommand
+if ($result.Success) {
+    Write-Host "更新成功"  -ForegroundColor Green
+} else {
+    Write-Host "更新失败" -ForegroundColor Red
+}
+
+Write-Host "正在安装依赖..."
+$installDeps = "apt-get install -y curl"
+$result = Invoke-WslCommand -DistributionName $DistroName -Command $installDeps
+if ($result.Success) {
+    Write-Host "依赖安装成功"  -ForegroundColor Green
+} else {
+    Write-Host "依赖安装失败" -ForegroundColor Red
+}
+
+Write-Host "正在安装 Docker..."
+$installDocker = @'
+#!/bin/sh
+
+install_docker_with_remote_script_iterative() {
+    max_retries="${1:-4}"
+    attempt_num=0
+    mirror_provider="Aliyun"
+
+    while [ "$attempt_num" -le "$max_retries" ]; do
+        echo "Attempting to download Docker script (Attempt $((attempt_num + 1)) of $((max_retries + 1)))..."
+        if content=$(curl -fsSL https://get.docker.com); then
+            echo "Docker script downloaded successfully."
+            echo "Modifying script and executing with mirror: $mirror_provider"
+            if printf '%s\n' "$content" | sed 's#sleep#test#g' | sh -s -- --mirror "$mirror_provider"; then
+                return 0
+            else
+                echo "Docker installation script execution failed." >&2
+                return 1
+            fi
+        else
+            echo "Failed to download Docker script on attempt $((attempt_num + 1))."
+            if [ "$attempt_num" -eq "$max_retries" ]; then
+                echo "All download attempts failed." >&2
+                return 1
+            fi
+            # sleep 1
+        fi
+        attempt_num=$((attempt_num + 1))
+    done
+    return 1
+}
+
+if install_docker_with_remote_script_iterative; then
+    echo "Docker installation process completed successfully."
+else
+    echo "Docker installation process failed." >&2
+    exit 1
+fi
+'@
+$tmpScript = Join-Path $WorkDir "docker_install.sh"
+$wslDestination = Join-Path (Join-Path "\\wsl$\$DistroName" "tmp") "docker_install.sh"
+
+try {
+    [System.IO.File]::WriteAllText($tmpScript, $installDocker, [System.Text.UTF8Encoding]::new($false))
+    Copy-Item -Path $tmpScript -Destination $wslDestination -Force
+
+    $result = Invoke-WslCommand -DistributionName $DistroName -Command "bash /tmp/docker_install.sh"
+    if ($result.Success) {
+        Write-Host "Docker 安装成功"  -ForegroundColor Green
+    } else {
+        Write-Host "Docker 安装失败" -ForegroundColor Red
+    }
+} catch {
+    Write-Warning "临时脚本创建失败: $($_.Exception.Message)"
 }
 
 $null = wsl --terminate $DistroName
