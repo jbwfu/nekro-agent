@@ -49,12 +49,6 @@ $TarballFilePath = Join-Path $WorkDir "install.tar.gz"
 
 $DistroInstallLocation = $InstallPath
 
-$WSLStatus = [PSCustomObject]@{
-    Enabled = $true
-    Version = $null
-    DistroInstalled = $false
-}
-
 # 注册脚本退出清理操作
 $action = {
     if (Test-Path -Path $WorkDir -PathType Container) {
@@ -201,7 +195,16 @@ function Invoke-WslCommand {
         $Command
     )
 
-    $null = wsl.exe @wslArgs 2>&1
+    try {
+        $console = ([console]::OutputEncoding)
+        [console]::OutputEncoding = New-Object System.Text.UTF8Encoding
+        # 此处错误输出后于标准输出
+        (wsl.exe @wslArgs | ForEach-Object { Write-Host "  $_`r"  -ForegroundColor Blue }) 2>&1 | ForEach-Object { Write-Host "  $_`r"  -ForegroundColor RED }
+    } catch {}
+    finally {
+        [console]::OutputEncoding = $console
+    }
+
     $exitCode = $LASTEXITCODE
     $isSuccess = ($exitCode -eq 0)
 
@@ -240,19 +243,35 @@ function Test-WslAvailability {
         [string]$DistroName
     )
 
+    $status = [PSCustomObject]@{
+        Enabled = $true
+        Version = $null
+        DistroInstalled = $false
+    }
+
+    $console = ([console]::OutputEncoding)
+    [console]::OutputEncoding = New-Object System.Text.UnicodeEncoding
+
     try {
         $installedDistributions = wsl.exe --list --quiet --all
     } catch {}
-    if ($LASTEXITCODE -ne 0) { $WSLStatus.Enabled = $false }
+    if ($LASTEXITCODE -ne 0) { $status.Enabled = $false }
     if ($installedDistributions -contains $DistroName) {
-        $WSLStatus.DistroInstalled = $true
+        $status.DistroInstalled = $true
     }
+    try {
+        $version = (wsl.exe --status)[-1][-1]
+    } catch {}
+    if ($LASTEXITCODE -eq 0) { $status.Version = $version }
+
+    [console]::OutputEncoding = $console
+    return $status
 }
 
 # 检测环境可用性
 Write-Host ""
 Write-Host "正在检测环境..."
-Test-WslAvailability $DistroName
+$WSLStatus = Test-WslAvailability $DistroName
 
 try {
     $processorInfo = Get-CimInstance -Class Win32_Processor -ErrorAction Stop | Select-Object -First 1
